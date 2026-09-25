@@ -9,7 +9,11 @@ description = "Claude Code plugin: MCP server for Microsoft Virtual Desktops on 
 requires-python = ">=3.11"
 authors = [{ name = "Arne von Appen" }]
 dependencies = [
-  "mcp>=1.2",
+  # Stopgap upper bound: mcp 2.0.0 removed the `mcp.server.fastmcp` package
+  # (renamed to `mcp.server.mcpserver`), and `vdesktop_plugin/server.py`
+  # imports FastMCP from the old path. Pinned below 2 until a deliberate
+  # migration to the 2.x server API (ticket #69).
+  "mcp>=1.2,<2",
   # The vdesktop automation engine. Pinned to an EXACT tag for deterministic
   # builds — bumps land via the dependency-update ticket that
   # lib-python-vdesktop's release pipeline files here (see AGENTS.md). pyvda /
