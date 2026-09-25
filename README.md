@@ -11,8 +11,8 @@ Works natively on Windows 11 **and from inside WSL** — the same binary runs in
 **Claude Code:**
 
 ```
-/plugin marketplace add Seretos/agent-marketplace
-/plugin install agent-vdesktop@agent-marketplace
+/plugin marketplace add seretos-agents/modular-software-factory
+/plugin install agent-vdesktop@modular-software-factory
 ```
 
 Self-contained `.exe` — no Python, no `pip install`, no dependencies.
@@ -31,7 +31,7 @@ The agent should call `create_desktop` → `apply_layout` → three `launch_*` t
 
 If your agent doesn't support marketplaces, or you want a specific version manually:
 
-1. Download `vdesktop-plugin-<version>.zip` from [Releases](https://github.com/Seretos/agent-vdesktop/releases).
+1. Download `vdesktop-plugin-<version>.zip` from [Releases](https://github.com/seretos-agents/agent-vdesktop/releases).
 2. Unpack to a stable folder (e.g. `C:\Users\<you>\.claude\plugins\agent-vdesktop\`).
 3. In Claude Code:
    ```
@@ -43,7 +43,7 @@ If your agent doesn't support marketplaces, or you want a specific version manua
 The `release` branch always carries the latest install-ready files (no zip step):
 
 ```
-git clone --branch release --depth 1 https://github.com/Seretos/agent-vdesktop.git
+git clone --branch release --depth 1 https://github.com/seretos-agents/agent-vdesktop.git
 ```
 
 Then `/plugin install <cloned-path>` in Claude Code.
@@ -53,7 +53,7 @@ Then `/plugin install <cloned-path>` in Claude Code.
 Requires Python 3.11+ (standard python.org installer with the `py` launcher).
 
 ```powershell
-git clone https://github.com/Seretos/agent-vdesktop.git
+git clone https://github.com/seretos-agents/agent-vdesktop.git
 cd agent-vdesktop
 py -3 -m pip install -e ".[build]"
 .\scripts\build.ps1 -Clean -Package

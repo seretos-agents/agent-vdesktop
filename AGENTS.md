@@ -99,6 +99,7 @@ response as a failure, not inspect a dict key.
 
 ## Cross-repo contract
 
-The marketplace dispatch payload format is defined in `agent-marketplace/AGENTS.md`; the dispatch
-step in `release.yml` here must match it. It authenticates with the `MARKETPLACE_DISPATCH_TOKEN`
-repo secret (write access to `Seretos/agent-marketplace`).
+The dispatch step in `release.yml`/`dispatch.yml` sends the same payload to both
+`seretos-agents/modular-software-factory-staging` (lands straight to main, no review) and
+`seretos-agents/modular-software-factory` (opens a review PR there). It authenticates with the
+`MARKETPLACE_DISPATCH_TOKEN` repo secret (write access to both).
