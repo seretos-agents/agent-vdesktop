@@ -1,10 +1,10 @@
 name: tests
 
-# Runs pytest on every push to any branch and on every PR. Distinct from
+# Runs pytest on every pull request only -- not on push. A push-triggered
+# run on the same branch as an open PR would duplicate the PR run (both
+# fire for the same commit), so PRs are the sole trigger. Distinct from
 # release.yml, which is tag-driven and produces the .exe / release zip.
 on:
-  push:
-    branches: ["**"]
   pull_request:
 
 permissions:
