@@ -77,12 +77,35 @@ def _require_windows() -> None:
 def test_codex_manifest_references_mcp_json():
     raw = CODEX_MANIFEST.read_text(encoding="utf-8")
     manifest = json.loads(raw)
-    assert manifest.get("mcpServers") == "./.mcp.json", (
+    mcp_ref = manifest.get("mcpServers")
+    assert mcp_ref == "./.mcp.json", (
         "expected .codex-plugin/plugin.json's mcpServers to be the string "
-        f"'./.mcp.json', got {manifest.get('mcpServers')!r}"
+        f"'./.mcp.json', got {mcp_ref!r}"
     )
     assert ".exe" not in raw, (
         f"expected no '.exe' reference left in {CODEX_MANIFEST}, but the raw text contains one"
+    )
+    # A literal-string match alone would pass for a manifest pointing at the
+    # right string in a form or location Codex never actually loads.
+    # Resolve the reference the way a loader would -- relative to the
+    # manifest's own directory, using the exact string from mcpServers --
+    # rather than trusting the hardcoded MCP_JSON constant, so a manifest
+    # holding the right literal but naming the wrong file still fails here.
+    referenced = (CODEX_MANIFEST.parent / mcp_ref).resolve()
+    assert referenced == MCP_JSON.resolve(), (
+        f"expected the reference {mcp_ref!r} (resolved against {CODEX_MANIFEST.parent}) "
+        f"to point at {MCP_JSON}, got {referenced}"
+    )
+    assert referenced.is_file(), (
+        f"expected the file referenced by mcpServers ({referenced}) to actually exist"
+    )
+    # Must be the SAME file R2 (test_mcp_json_command_is_extensionless)
+    # validates the shape of -- loaded via the resolved reference, not a
+    # same-named decoy elsewhere.
+    referenced_manifest = json.loads(referenced.read_text(encoding="utf-8"))
+    assert "vdesktop" in referenced_manifest.get("mcpServers", {}), (
+        f"expected {referenced} (the file mcpServers actually points at) to "
+        "declare an mcpServers.vdesktop entry"
     )
 
 
@@ -111,6 +134,25 @@ def test_mcp_json_command_is_extensionless():
     assert ".exe" not in raw, f"expected no '.exe' reference in {MCP_JSON}"
     assert isinstance(server["args"], list)
     assert server["cwd"] == "."
+
+    # The literal checks above pass for a .mcp.json nothing ever reads.
+    # Prove the command is actually resolvable to a real file, using the
+    # same resolution logic (plugin root + cwd + command) the build and
+    # Codex apply, and tie it to the SAME file R3 (test_launcher_committed_executable)
+    # and R4 (test_staged_package_ships_declared_command) reason about --
+    # so a syntactically-fine but wrong/unresolvable command fails here.
+    plugin_root = MCP_JSON.parent
+    resolved_command = (plugin_root / server["cwd"] / server["command"]).resolve()
+    assert resolved_command == LAUNCHER.resolve(), (
+        f"expected command {server['command']!r} resolved against cwd {server['cwd']!r} "
+        f"from the plugin root {plugin_root} to point at {LAUNCHER}, got {resolved_command}"
+    )
+    resolved_exe = resolved_command.with_name(resolved_command.name + ".exe")
+    expected_exe = (REPO_ROOT / "bin" / "vdesktop.exe").resolve()
+    assert resolved_exe == expected_exe, (
+        f"expected the .exe sibling of the resolved command to be {expected_exe} "
+        f"(the same build artifact R4 resolves in the staged package), got {resolved_exe}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -239,15 +281,30 @@ def test_staged_package_ships_declared_command(tmp_path):
     assert linked.exists(), f"expected the staged manifest's mcpServers file to exist at {linked}"
 
 
-def test_resolve_fails_when_package_lacks_exe(tmp_path):
-    """Additional edge-case coverage: with no .exe stub in the stage,
-    Resolve-McpCommand's throw names the missing vdesktop.exe path."""
+def test_resolve_reads_declared_command_from_mcp_json(tmp_path):
+    """Additional edge-case coverage: Resolve-McpCommand must actually read
+    .mcp.json's declared command rather than returning a hardcoded
+    bin\\vdesktop.exe path. Retargeting the staged manifest's command to a
+    different (still extensionless) name must change the resolved output to
+    follow it."""
     _require_windows()
     root = tmp_path / "root"
     stage = tmp_path / "stage"
     root.mkdir()
     _copy_git_tracked_files(root)
-    # Deliberately no bin/vdesktop.exe stub this time.
+    bin_dir = root / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "vdesktop.exe").write_bytes(b"MZ")
+    # A second, differently-named build artifact so the retargeted command
+    # still resolves to a real staged file.
+    (bin_dir / "otherlauncher.exe").write_bytes(b"MZ")
+
+    # Point the root .mcp.json's declared command at a different name before
+    # staging -- a resolver that hardcodes bin\vdesktop.exe would not notice.
+    mcp_json_path = root / ".mcp.json"
+    mcp_config = json.loads(mcp_json_path.read_text(encoding="utf-8"))
+    mcp_config["mcpServers"]["vdesktop"]["command"] = "./bin/otherlauncher"
+    mcp_json_path.write_text(json.dumps(mcp_config), encoding="utf-8")
 
     command = (
         "$ErrorActionPreference = 'Stop'; "
@@ -258,9 +315,74 @@ def test_resolve_fails_when_package_lacks_exe(tmp_path):
         "} catch { Write-Error $_; exit 1 }"
     )
     result = _run_package_lib_command(command)
+    assert result.returncode == 0, (
+        f"expected exit 0, got {result.returncode}; stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert stdout_lines, f"expected Resolve-McpCommand to print a path; stdout={result.stdout!r}"
+    resolved = stdout_lines[-1].strip()
+    expected = stage / "bin" / "otherlauncher.exe"
+    assert resolved == str(expected), (
+        f"expected Resolve-McpCommand to follow the retargeted command and resolve to "
+        f"{str(expected)!r}, got {resolved!r} -- a resolver that hardcodes bin\\vdesktop.exe "
+        "would still print the original path here"
+    )
+    assert resolved != str(stage / "bin" / "vdesktop.exe"), (
+        f"resolved path {resolved!r} must not be the original hardcoded vdesktop.exe path -- "
+        "that would mean the resolver never read .mcp.json's command field"
+    )
+
+
+def test_resolve_fails_when_package_lacks_exe(tmp_path):
+    """Additional edge-case coverage: with no .exe stub in the stage,
+    Resolve-McpCommand's throw names the missing vdesktop.exe path.
+
+    Copy-PluginStage and Resolve-McpCommand run as two separate PowerShell
+    invocations (rather than one try/catch around both) so the failure below
+    can only be attributed to Resolve-McpCommand's own check -- not to
+    Copy-PluginStage failing first for an unrelated reason (e.g. an
+    implementation that copies bin\\vdesktop.exe by explicit path and throws
+    on the missing file itself, before Resolve-McpCommand ever runs).
+    Copy-PluginStage must actually succeed -- proven by the staged shim's
+    presence -- before the resolve step is even attempted.
+    """
+    _require_windows()
+    root = tmp_path / "root"
+    stage = tmp_path / "stage"
+    root.mkdir()
+    _copy_git_tracked_files(root)
+    # Deliberately no bin/vdesktop.exe stub in root/bin -- it's gitignored,
+    # so a real checkout would not have it either.
+
+    copy_command = (
+        "$ErrorActionPreference = 'Stop'; "
+        "try { "
+        f". '{PACKAGE_LIB}'; "
+        f"Copy-PluginStage -Root '{root}' -Stage '{stage}' "
+        "} catch { Write-Error $_; exit 1 }"
+    )
+    copy_result = _run_package_lib_command(copy_command)
+    assert copy_result.returncode == 0, (
+        "expected Copy-PluginStage alone to succeed even without bin/vdesktop.exe "
+        f"present; stdout={copy_result.stdout!r} stderr={copy_result.stderr!r}"
+    )
+    staged_shim = stage / "bin" / "vdesktop"
+    assert staged_shim.exists(), (
+        f"expected Copy-PluginStage to have staged {staged_shim} -- if the copy step "
+        "didn't actually run, the resolver failure checked below would prove nothing"
+    )
+
+    resolve_command = (
+        "$ErrorActionPreference = 'Stop'; "
+        "try { "
+        f". '{PACKAGE_LIB}'; "
+        f"Resolve-McpCommand -PluginRoot '{stage}' "
+        "} catch { Write-Error $_; exit 1 }"
+    )
+    result = _run_package_lib_command(resolve_command)
     assert result.returncode != 0, (
-        f"expected a non-zero exit when the staged package lacks vdesktop.exe, got 0; "
-        f"stdout={result.stdout!r}"
+        "expected Resolve-McpCommand alone (staging already succeeded above) to fail "
+        f"when the staged package lacks vdesktop.exe, got 0; stdout={result.stdout!r}"
     )
     assert "vdesktop.exe" in result.stderr, (
         f"expected stderr to name the missing vdesktop.exe path, got stderr={result.stderr!r}"
@@ -278,8 +400,14 @@ def test_shim_execs_sibling_exe(tmp_path):
     bin_dir.mkdir()
     shutil.copy2(LAUNCHER, bin_dir / "vdesktop")  # FileNotFoundError pre-change
     stub = bin_dir / "vdesktop.exe"
+    # The stub prints its own $0 first. If bin/vdesktop really execs this
+    # sibling file, $0 inside the stub is the exec target name and ends in
+    # "vdesktop.exe". A bin/vdesktop that never execs -- i.e. one whose own
+    # body IS "echo $0; echo $@; cat", masquerading as the whole double --
+    # would instead report its own invocation name ("./bin/vdesktop", no
+    # ".exe"), so that variant fails the assertion below.
     with open(stub, "w", newline="\n", encoding="utf-8") as f:
-        f.write('#!/bin/sh\necho "$@"\ncat\n')
+        f.write('#!/bin/sh\necho "$0"\necho "$@"\ncat\n')
 
     chmod = subprocess.run(
         [BASH_EXE, "-c", "chmod +x bin/vdesktop bin/vdesktop.exe"],
@@ -299,4 +427,17 @@ def test_shim_execs_sibling_exe(tmp_path):
     assert result.returncode == 0, (
         f"expected exit 0, got {result.returncode}; stderr={result.stderr!r}"
     )
-    assert result.stdout == b"a b\nping", f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    lines = result.stdout.split(b"\n", 1)
+    assert len(lines) == 2, (
+        f"expected an argv0 line followed by the passthrough payload; stdout={result.stdout!r}"
+    )
+    argv0_line, payload = lines
+    argv0 = argv0_line.decode("utf-8", errors="replace")
+    # Proves an exec hand-off actually crossed into the sibling file: the
+    # process image that produced this output reports itself as
+    # ".../vdesktop.exe", not the shim's own name ("vdesktop").
+    assert argv0.endswith("vdesktop.exe"), (
+        "expected the stub's own $0 to end in 'vdesktop.exe' (proving bin/vdesktop "
+        f"exec'd its sibling rather than acting as the double itself), got {argv0!r}"
+    )
+    assert payload == b"a b\nping", f"stdout payload={payload!r} (full stdout={result.stdout!r})"
