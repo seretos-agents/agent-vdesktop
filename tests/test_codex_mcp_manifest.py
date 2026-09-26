@@ -87,13 +87,16 @@ def test_codex_manifest_references_mcp_json():
     )
     # A literal-string match alone would pass for a manifest pointing at the
     # right string in a form or location Codex never actually loads.
-    # Resolve the reference the way a loader would -- relative to the
-    # manifest's own directory, using the exact string from mcpServers --
-    # rather than trusting the hardcoded MCP_JSON constant, so a manifest
-    # holding the right literal but naming the wrong file still fails here.
-    referenced = (CODEX_MANIFEST.parent / mcp_ref).resolve()
+    # Resolve the reference the way a loader would -- per plan P2, "paths
+    # resolve against the plugin root" (REPO_ROOT), using the exact string
+    # from mcpServers -- rather than trusting the hardcoded MCP_JSON
+    # constant, so a manifest holding the right literal but naming the wrong
+    # file still fails here. (NOT against CODEX_MANIFEST.parent --
+    # .codex-plugin/ is not the plugin root, and resolving there would make
+    # this assertion contradict a correct implementation.)
+    referenced = (REPO_ROOT / mcp_ref).resolve()
     assert referenced == MCP_JSON.resolve(), (
-        f"expected the reference {mcp_ref!r} (resolved against {CODEX_MANIFEST.parent}) "
+        f"expected the reference {mcp_ref!r} (resolved against the plugin root {REPO_ROOT}) "
         f"to point at {MCP_JSON}, got {referenced}"
     )
     assert referenced.is_file(), (
@@ -147,6 +150,17 @@ def test_mcp_json_command_is_extensionless():
         f"expected command {server['command']!r} resolved against cwd {server['cwd']!r} "
         f"from the plugin root {plugin_root} to point at {LAUNCHER}, got {resolved_command}"
     )
+    # The equality above is path arithmetic on the same literals already
+    # asserted, so it holds by construction and proves nothing on its own.
+    # Require the resolved command to actually exist ON DISK -- a .mcp.json
+    # with syntactically-correct-but-dangling paths (the launcher never
+    # committed, or committed under a different name) fails here even though
+    # every literal check above it passed.
+    assert resolved_command.exists(), (
+        f"expected the resolved command {resolved_command} to exist on disk, "
+        "but no file is there -- a correct './bin/vdesktop' literal is not "
+        "enough if the launcher itself was never committed"
+    )
     resolved_exe = resolved_command.with_name(resolved_command.name + ".exe")
     expected_exe = (REPO_ROOT / "bin" / "vdesktop.exe").resolve()
     assert resolved_exe == expected_exe, (
@@ -172,13 +186,20 @@ def test_launcher_committed_executable():
     mode = line.split()[0]
     assert mode == "100755", f"expected mode 100755 for bin/vdesktop, got {mode!r} (line={line!r})"
 
+    # --no-index is required: without it, `git check-ignore` never reports a
+    # path that is already in the index as ignored (it exits 1 regardless of
+    # whether a .gitignore rule matches), so the check above -- which just
+    # proved bin/vdesktop IS tracked -- would make this assertion toothless.
+    # --no-index consults the .gitignore patterns independent of tracking
+    # state, so a rule like `bin/*` still makes this fail (exit 0) even
+    # though the file is committed.
     ignore = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "check-ignore", "bin/vdesktop"],
+        ["git", "-C", str(REPO_ROOT), "check-ignore", "--no-index", "bin/vdesktop"],
         capture_output=True,
         text=True,
     )
     assert ignore.returncode == 1, (
-        f"expected bin/vdesktop to NOT be gitignored (git check-ignore exit 1), "
+        f"expected bin/vdesktop to NOT be gitignored (git check-ignore --no-index exit 1), "
         f"got {ignore.returncode} (stdout={ignore.stdout!r})"
     )
 
@@ -398,7 +419,8 @@ def test_shim_execs_sibling_exe(tmp_path):
     _require_bash()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    shutil.copy2(LAUNCHER, bin_dir / "vdesktop")  # FileNotFoundError pre-change
+    shim_path = bin_dir / "vdesktop"
+    shutil.copy2(LAUNCHER, shim_path)  # FileNotFoundError pre-change
     stub = bin_dir / "vdesktop.exe"
     # The stub prints its own $0 first. If bin/vdesktop really execs this
     # sibling file, $0 inside the stub is the exec target name and ends in
@@ -416,11 +438,20 @@ def test_shim_execs_sibling_exe(tmp_path):
     )
     assert chmod.returncode == 0, f"chmod setup failed: {chmod.stderr!r}"
 
-    # cwd is tmp_path, not tmp_path/bin -- the shim must resolve its sibling
-    # via $(dirname "$0"), not via the caller's working directory.
+    # Run from a directory that is neither bin/ nor its parent, and invoke
+    # the shim by its own absolute path (argv0), not a "./bin/vdesktop"
+    # reference relative to this cwd. This discriminates dirname-based
+    # resolution from cwd-relative resolution: a shim written as
+    # `exec ./bin/vdesktop.exe "$@"` would resolve that path against
+    # `elsewhere` -- which has no bin/ subdirectory -- and fail to find its
+    # sibling, while a shim using `$(dirname "$0")` still finds it because
+    # $0 (the absolute shim path passed below) carries its own location
+    # regardless of the caller's working directory.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
     result = subprocess.run(
-        [BASH_EXE, "-c", 'exec "$0" "$@"', "./bin/vdesktop", "a", "b"],
-        cwd=tmp_path,
+        [BASH_EXE, "-c", 'exec "$0" "$@"', str(shim_path), "a", "b"],
+        cwd=elsewhere,
         input=b"ping",
         capture_output=True,
     )
