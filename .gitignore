@@ -16,3 +16,4 @@ dist/
 # shipped to end users via GitHub Releases (release tarball), not the repo.
 bin/vdesktop.exe
 *.pyinstaller.tmp/
+.adev/
