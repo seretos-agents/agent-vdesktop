@@ -4,12 +4,7 @@
   "description": "Microsoft Virtual Desktop management for Codex (native Windows + WSL). Create/delete/switch desktops, apply layouts (presets and custom percent splits, multi-monitor), launch Chrome/Terminal/VSCode into layout slots, pin apps across desktops.",
   "author": { "name": "Arne von Appen" },
   "repository": "https://github.com/seretos-agents/agent-vdesktop",
-  "mcpServers": {
-    "vdesktop": {
-      "command": "${PLUGIN_ROOT}/bin/vdesktop.exe",
-      "args": []
-    }
-  },
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Agent vDesktop",
     "shortDescription": "Microsoft Virtual Desktop management for Codex on Windows."

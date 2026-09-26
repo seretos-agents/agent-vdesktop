@@ -176,13 +176,23 @@ jobs:
           find . -mindepth 1 -not -path './.git*' | sort
 
           git add -A
-          # WSL/Linux clones need the executable bit on the EXE so the kernel
-          # can dispatch it through binfmt_misc; on Windows runners `chmod +x`
-          # is a no-op against the filesystem, only `git update-index` writes
-          # mode 100755 into the index (ticket #9).
-          if [ -f bin/vdesktop.exe ]; then
-            git update-index --chmod=+x bin/vdesktop.exe
-          fi
+          # WSL/Linux clones need the executable bit on both the WSL shim
+          # (bin/vdesktop, dispatched directly by the shell) and the EXE
+          # (bin/vdesktop.exe, dispatched through binfmt_misc when the shim
+          # execs it); on Windows runners `chmod +x` is a no-op against the
+          # filesystem, only `git update-index` writes mode 100755 into the
+          # index (ticket #9). Fail loudly instead of silently skipping a
+          # missing file -- a release that ships without one of them leaves
+          # Codex's ./bin/vdesktop reference (or its WSL resolution path)
+          # broken with no signal until a user hits it.
+          for f in bin/vdesktop bin/vdesktop.exe; do
+            if [ ! -f "$f" ]; then
+              echo "::error::missing $f -- refusing to release without it"
+              exit 1
+            fi
+            git update-index --chmod=+x "$f"
+          done
+          git ls-files -s bin/
           git commit -m "release: v${{ inputs.version }}"
           git push origin release --force
 
