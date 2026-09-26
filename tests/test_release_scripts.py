@@ -154,6 +154,11 @@ R1_CASES = [
             "src/agent-vdesktop--v0.1.12",
             "other--v9.9.9",
             "agent-vdesktop--v01.2.3",
+            # Below the new version too, so the ignore-filtering is exercised
+            # independently of "excludes higher tags" -- these would win on
+            # value alone if the prefix/grammar filter did not drop them.
+            "other--v0.1.1",
+            "agent-vdesktop--v00.1.1",
             "agent-vdesktop--v0.1.5",
         ],
         "0.2.0",

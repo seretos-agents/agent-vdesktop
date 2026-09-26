@@ -90,6 +90,45 @@ merge between them. All real edits go to `main`.
 - `dispatch.yml` is a manual recovery tool (re-send the marketplace dispatch) — don't give it
   automatic triggers.
 
+## Contracts
+
+- **The `src/<TAG>` marker.** The `release` branch is an orphan re-created from scratch on every
+  release, so it shares no history with `main` or with any previous release. `gh
+  release create`'s own `--generate-notes` therefore has no merge-base to diff against and only
+  ever shows the single `release: vX.Y.Z` bot commit. `release.yml` fixes this by pushing a
+  lightweight tag `src/<TAG>` (e.g. `src/agent-vdesktop--v0.1.11`) at the `main` commit the
+  release was built from, unconditionally, right after the build and before the orphan branch is
+  created. That marker lives on `main`'s real, linear history, so `releases/generate-notes` can be
+  called explicitly with `previous_tag_name=src/<PREV_TAG>` and `target_commitish=<main SHA>` to
+  compute a real range of commits between two releases.
+- **The workflow never creates `src/<PREV_TAG>`.** `GITHUB_TOKEN` cannot push a ref at a
+  historical commit whose workflow files differ from the current default branch tip (GitHub's
+  workflow-file protection); the previous release's `main` commit is exactly such a historical
+  commit. So the pre-flight only ever pushes today's `src/<TAG>` (at today's tip, where the rule
+  does not fire) and *requires* the previous marker to already exist — it fails fast, before any
+  side effect, if `src/<PREV_TAG>` is missing.
+- **One-time bootstrap for a pre-existing latest release.** Before the *next* release runs, a
+  human must push the `src/` marker for the current latest tag once, using a credential with
+  `workflow` scope (`GITHUB_TOKEN` is refused for the reason above):
+  ```sh
+  gh auth refresh -s workflow
+  RUN_ID=$(gh run list --repo seretos-agents/agent-vdesktop --workflow release.yml --json databaseId -q '.[0].databaseId')
+  HEAD_SHA=$(gh run view "$RUN_ID" --repo seretos-agents/agent-vdesktop --json headSha -q .headSha)
+  git tag src/<PREV_TAG> "$HEAD_SHA"
+  git push origin src/<PREV_TAG>
+  ```
+  Current latest release per local refs: `agent-vdesktop--v0.1.3`. Until this bootstrap runs, the
+  pre-flight fails the *next* release by design, at no other cost — rerun `release.yml` with the
+  same version once the marker is pushed.
+- **Never delete or move a `src/` marker.** A failed or superseded release just takes a new
+  version; a `src/` tag, once pushed, is permanent history that later releases' changelogs depend
+  on.
+- **The marketplace payload is built only through `marketplace-payload.sh`.** Both
+  `release.yml` and `dispatch.yml` shell out to `.github/scripts/marketplace-payload.sh` (never a
+  heredoc) so the two workflows can't drift, and so a changelog body containing quotes, backticks,
+  `$(...)`, or a leading `/` round-trips byte-for-byte through `jq -n --arg` instead of through
+  fragile string interpolation.
+
 ## Error contracts
 
 Tools in this repo raise exceptions (which FastMCP surfaces as tool errors)
