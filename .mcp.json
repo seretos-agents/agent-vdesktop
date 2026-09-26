@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "vdesktop": {
+      "command": "./bin/vdesktop",
+      "args": [],
+      "cwd": "."
+    }
+  }
+}

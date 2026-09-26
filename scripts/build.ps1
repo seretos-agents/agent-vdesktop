@@ -17,6 +17,11 @@ param(
 $root = (Resolve-Path "$PSScriptRoot\..").Path
 Set-Location $root
 
+# Shared staging (Copy-PluginStage) and command-resolution (Resolve-McpCommand)
+# logic -- also dot-sourced directly by tests/test_codex_mcp_manifest.py (R4)
+# so the PR suite exercises the real code path this script runs.
+. (Join-Path $PSScriptRoot "package-lib.ps1")
+
 # Note: do NOT set $ErrorActionPreference = "Stop" globally. PowerShell 5.1
 # wraps native-command stderr as ErrorRecord, which trips Stop semantics for
 # tools like PyInstaller that log heavily to stderr. We check $LASTEXITCODE
@@ -133,20 +138,44 @@ if (-not $copied) {
 }
 
 # 6. Smoke-test: MCP initialize handshake.
+# Resolve the command the way Codex/Windows actually resolves .mcp.json's
+# declared "./bin/vdesktop" (P1: Windows appends ".exe" to an extensionless
+# relative command) rather than hard-coding "bin\vdesktop.exe" here, so a
+# build never silently smoke-tests a launcher .mcp.json no longer declares.
 # PowerShell 5.1's Process StreamWriter prepends a UTF-8 BOM that MCP rejects.
 # Work around it by staging the request in a temp file and using
 # Start-Process -RedirectStandardInput, which pipes raw OS bytes.
 Write-Step "Smoke-testing the binary (MCP initialize)"
+$mcpConfig = Get-Content -Raw -Path (Join-Path $root ".mcp.json") | ConvertFrom-Json
+$declaredCommand = $mcpConfig.mcpServers.vdesktop.command
+$declaredArgs = $mcpConfig.mcpServers.vdesktop.args
+try {
+    $resolvedCommand = Resolve-McpCommand -PluginRoot $root
+} catch {
+    Fail "Resolve-McpCommand failed: $_"
+}
+Write-Host "    $declaredCommand -> $resolvedCommand"
 $initMsg = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"build-smoke","version":"1"}}}'
 $inFile = [System.IO.Path]::GetTempFileName()
 $outFile = [System.IO.Path]::GetTempFileName()
 $errFile = [System.IO.Path]::GetTempFileName()
 [System.IO.File]::WriteAllBytes($inFile, [System.Text.Encoding]::UTF8.GetBytes($initMsg + "`n"))
-$proc = Start-Process -FilePath "bin\vdesktop.exe" `
-    -RedirectStandardInput $inFile `
-    -RedirectStandardOutput $outFile `
-    -RedirectStandardError $errFile `
-    -NoNewWindow -PassThru
+# Splatted rather than passed as a fixed -ArgumentList: PS 5.1's Start-Process
+# rejects -ArgumentList outright when the array is empty ("argument is NULL
+# or empty"), and .mcp.json's declared args is exactly that ([]).
+$startProcessArgs = @{
+    FilePath              = $resolvedCommand
+    RedirectStandardInput = $inFile
+    RedirectStandardOutput = $outFile
+    RedirectStandardError = $errFile
+    WorkingDirectory      = $root
+    NoNewWindow           = $true
+    PassThru              = $true
+}
+if ($declaredArgs -and @($declaredArgs).Count -gt 0) {
+    $startProcessArgs["ArgumentList"] = $declaredArgs
+}
+$proc = Start-Process @startProcessArgs
 if (-not $proc.WaitForExit(8000)) { $proc.Kill(); Start-Sleep -Milliseconds 200 }
 $stdout = (Get-Content -Raw -ErrorAction SilentlyContinue $outFile)
 $stderrText = (Get-Content -Raw -ErrorAction SilentlyContinue $errFile)
@@ -167,27 +196,20 @@ if ($Package) {
     $zipPath = Join-Path $root "dist\$zipName"
     if (Test-Path $zipPath) { Remove-Item $zipPath }
     $stage = Join-Path $root "build\stage\vdesktop-plugin"
-    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $root "build\stage")
-    New-Item -ItemType Directory -Force -Path $stage | Out-Null
-    Copy-Item -Recurse -Force ".claude-plugin" $stage
-    if (Test-Path ".codex-plugin") {
-        Copy-Item -Recurse -Force ".codex-plugin" $stage
+    Copy-PluginStage -Root $root -Stage $stage
+    # Resolve against the STAGED copy, not $root -- the smoke test in step 6
+    # already proved $root's own layout works, but only this call proves the
+    # zip actually contains what .mcp.json's declared command resolves to.
+    try {
+        $stagedResolved = Resolve-McpCommand -PluginRoot $stage
+    } catch {
+        Fail "Resolve-McpCommand failed on the staged package: $_"
     }
-    if (Test-Path ".mcp.json") {
-        Copy-Item -Force ".mcp.json" $stage
-    }
-    Copy-Item -Recurse -Force "bin" $stage
-    if (Test-Path "skills") {
-        Copy-Item -Recurse -Force "skills" $stage
-    }
-    Copy-Item -Force "README.md", "LICENSE", "description.md" $stage -ErrorAction SilentlyContinue
-    if (Test-Path "assets") {
-        Copy-Item -Recurse -Force "assets" $stage
-    }
+    Write-Host "    staged command resolves to $stagedResolved"
     Compress-Archive -Path "$stage\*" -DestinationPath $zipPath -Force
     $zipSize = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
     Write-Host "    dist/$zipName (${zipSize} MB)"
 }
 
 Write-Step "Done."
-Write-Host "bin/vdesktop.exe is ready. Plugin manifest already points at it."
+Write-Host "bin/vdesktop.exe is ready. .mcp.json's declared ./bin/vdesktop already resolves to it."

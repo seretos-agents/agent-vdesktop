@@ -128,6 +128,14 @@ merge between them. All real edits go to `main`.
   heredoc) so the two workflows can't drift, and so a changelog body containing quotes, backticks,
   `$(...)`, or a leading `/` round-trips byte-for-byte through `jq -n --arg` instead of through
   fragile string interpolation.
+- **Codex resolves its MCP command through `.mcp.json`, not an inline entry.**
+  `.codex-plugin/plugin.json` points `mcpServers` at `"./.mcp.json"`, which declares the
+  extensionless `./bin/vdesktop` with `"cwd": "."`. That resolves to `bin/vdesktop.exe` on Windows
+  (Windows's own append-`.exe`-if-missing rule) and to the committed `bin/vdesktop` `#!/bin/sh`
+  shim on WSL, which `exec`s the sibling `.exe` via `binfmt_misc`. Staging (`Copy-PluginStage`) and
+  resolution (`Resolve-McpCommand`) live only in `scripts/package-lib.ps1`, dot-sourced by both
+  `build.ps1` (its smoke test and packaging step) and `tests/test_codex_mcp_manifest.py` — never
+  duplicate either function elsewhere.
 
 ## Error contracts
 
