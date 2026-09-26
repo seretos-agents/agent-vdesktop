@@ -20,7 +20,7 @@ dependencies = [
   # pywin32 / comtypes / uiautomation come transitively from the lib; they are
   # deliberately not re-declared so the plugin only ever talks to Windows
   # through the lib's VDesktopManager surface.
-  "lib-python-vdesktop @ git+https://github.com/seretos-agents/lib-python-vdesktop@v0.1.8",
+  "lib-python-vdesktop @ git+https://github.com/seretos-agents/lib-python-vdesktop@v0.1.9",
 ]
 
 [project.optional-dependencies]
