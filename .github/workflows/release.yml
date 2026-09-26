@@ -3,12 +3,15 @@ name: release
 # Manual release flow:
 #   1. Trigger via Actions tab -> "Run workflow" -> enter version (e.g. 0.0.1)
 #      or via CLI: gh workflow run release.yml -f version=0.0.1
-#   2. Workflow stamps version into pyproject.toml + plugin.json (in CI only),
-#      builds the .exe, pushes an orphan release branch with install-ready
-#      files, creates the v{version} tag on that commit, and publishes a
-#      GitHub Release.
-#   3. The tag push triggers dispatch.yml on the release branch, which then
-#      notifies the agent-marketplace.
+#   2. Pre-flight validates the version and the src/<TAG>, src/<PREV_TAG>
+#      markers before any side effect. The workflow then stamps version into
+#      pyproject.toml + plugin.json (in CI only), builds the .exe, pushes
+#      src/<TAG> at the built main commit, pushes an orphan release branch
+#      with install-ready files, creates the v{version} tag on that commit,
+#      and publishes a GitHub Release with real generated notes.
+#   3. GITHUB_TOKEN-authored pushes/tags never fire downstream Actions (loop
+#      prevention), so this workflow calls the marketplace dispatch directly
+#      at the end instead of relying on a tag-push trigger.
 on:
   workflow_dispatch:
     inputs:
@@ -25,29 +28,58 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - name: Validate version is semver
-        shell: bash
-        run: |
-          V="${{ inputs.version }}"
-          if [[ ! "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Version '$V' is not valid semver (expected MAJOR.MINOR.PATCH[-PRERELEASE])."
-            exit 1
-          fi
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Fail if tag already exists
+      - name: "Pre-flight: version, tags, src/ markers"
+        id: pre
         shell: bash
         run: |
+          set -eo pipefail
+          # $BASH is bash's own builtin -- the absolute path of the currently
+          # running interpreter -- never a bare `bash` PATH lookup (which on
+          # a Windows runner can resolve to a WSL stub that cannot see the
+          # Windows filesystem the way Git bash does).
+          S="$RUNNER_TEMP/release-scripts"
+          cp -r .github/scripts "$S"
+
           PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
-          TAG="${PLUGIN_NAME}--v${{ inputs.version }}"
+          VERSION="${{ inputs.version }}"
+
+          # Validates VERSION (strict SemVer 2.0.0) as a side effect; a bad
+          # version fails this step under `set -eo pipefail` before anything
+          # else runs.
+          PREV_TAG=$(git tag -l | "$BASH" "$S/prev-release-tag.sh" "$PLUGIN_NAME" "$VERSION")
+
+          TAG="${PLUGIN_NAME}--v${VERSION}"
           if gh api "repos/${{ github.repository }}/git/refs/tags/${TAG}" >/dev/null 2>&1; then
             echo "::error::Tag ${TAG} already exists. Delete it first or pick a new version."
             exit 1
           fi
+
+          # The singular git/ref endpoint gives an exact match; the plural
+          # git/refs endpoint above prefix-matches, which is what the
+          # tag-already-exists check above wants. Here we need the exact
+          # src/<TAG> ref, so use the singular form.
+          if gh api "repos/${{ github.repository }}/git/ref/tags/src/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Marker tag src/${TAG} already exists. A src/ marker is never deleted or moved once pushed (see AGENTS.md Contracts); pick a new version."
+            exit 1
+          fi
+
+          if [ -n "$PREV_TAG" ] && ! gh api "repos/${{ github.repository }}/git/ref/tags/src/${PREV_TAG}" >/dev/null 2>&1; then
+            echo "::error::Marker tag src/${PREV_TAG} is missing. Bootstrap it once (see AGENTS.md Contracts), e.g.:"
+            echo "::error::  RUN_ID=\$(gh run list --repo ${{ github.repository }} --workflow release.yml --json databaseId,headBranch -q '.[0].databaseId')"
+            echo "::error::  HEAD_SHA=\$(gh run view \$RUN_ID --repo ${{ github.repository }} --json headSha -q .headSha)"
+            echo "::error::  git tag src/${PREV_TAG} \$HEAD_SHA && git push origin src/${PREV_TAG}"
+            exit 1
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+          echo "main_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "scripts=${S}" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -102,6 +134,14 @@ jobs:
             exit 1
           fi
 
+          # Marker tag on main's source commit, unconditional -- no
+          # exists-guard, by design (see AGENTS.md Contracts). The pre-flight
+          # already proved src/${{ steps.pre.outputs.tag }} does not exist yet.
+          # This must land BEFORE the orphan branch below: the orphan tree
+          # shares no history with main, so generate-notes can only build a
+          # real range from a marker that lives on main's history.
+          git push origin "${{ steps.pre.outputs.main_sha }}:refs/tags/src/${{ steps.pre.outputs.tag }}"
+
           # Stash staging tree AND the release zip outside the worktree, since
           # "git checkout --orphan" + clean will wipe dist/ before we attach
           # the zip to the GitHub Release.
@@ -151,52 +191,63 @@ jobs:
 
       # Tag und Release in einem Schritt — gh release create setzt den Tag
       # automatisch auf den angegebenen Target-Commit (sha) und publisht den
-      # Release. Das Tag-Push triggert dispatch.yml im selben Tag-Commit.
+      # Release. GITHUB_TOKEN-authored tag pushes never fire dispatch.yml
+      # (Actions blocks GITHUB_TOKEN-originated events to prevent recursive
+      # workflow loops), so the Dispatch step below calls the marketplace
+      # directly instead of relying on a tag-push trigger.
+      #
+      # --generate-notes/--notes-start-tag cannot be used here: the release
+      # tag is created on the orphan `release` branch's commit, which shares
+      # no history with main (or with the previous release tag), so GitHub
+      # cannot compute a merge-base to diff against. generate-notes is
+      # instead called explicitly below, scoped between the src/ markers
+      # that DO live on main's linear history.
       - name: Create tag and GitHub Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
-          TAG="${PLUGIN_NAME}--v${{ inputs.version }}"
+          set -eo pipefail
+          TAG="${{ steps.pre.outputs.tag }}"
+          PREV_TAG="${{ steps.pre.outputs.prev_tag }}"
+
+          ARGS=(-f tag_name="src/$TAG" -f target_commitish="${{ steps.pre.outputs.main_sha }}")
+          if [ -n "$PREV_TAG" ]; then
+            ARGS+=(-f previous_tag_name="src/$PREV_TAG")
+          fi
+          gh api "repos/${{ github.repository }}/releases/generate-notes" "${ARGS[@]}" --jq .body > "$RUNNER_TEMP/notes.md"
+
           gh release create "$TAG" \
             --repo "${{ github.repository }}" \
             --target "${{ steps.rel.outputs.sha }}" \
             --title "$TAG" \
-            --generate-notes \
+            --notes-file "$RUNNER_TEMP/notes.md" \
             ${{ contains(inputs.version, '-') && '--prerelease' || '' }} \
             "${{ steps.rel.outputs.asset }}"
 
-      # The tag we just created via gh/GITHUB_TOKEN does NOT fire push:tags
-      # in dispatch.yml — Actions blocks GITHUB_TOKEN-originated events to
-      # prevent recursive workflow loops. So call the marketplace directly
-      # from here.
       - name: Dispatch to agent-marketplace
         shell: bash
         env:
-          GH_PAT:  ${{ secrets.MARKETPLACE_DISPATCH_TOKEN }}
-          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_PAT:   ${{ secrets.MARKETPLACE_DISPATCH_TOKEN }}
+          VERSION:  ${{ inputs.version }}
         run: |
+          set -eo pipefail
+          S="${{ steps.pre.outputs.scripts }}"
+
           DESC=$(jq -r '.description' .claude-plugin/plugin.json)
           NAME=$(jq -r '.name'        .claude-plugin/plugin.json)
           TAG="${NAME}--v${VERSION}"
-          PAYLOAD=$(cat <<EOF
-          {
-            "event_type": "plugin-release",
-            "client_payload": {
-              "name":        "${NAME}",
-              "description": "${DESC}",
-              "repo":        "${{ github.repository }}",
-              "category":    "mcp",
-              "version":     "${VERSION}",
-              "ref":         "${TAG}",
-              "icon":            "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/assets/icon.png",
-              "description_url": "https://raw.githubusercontent.com/${{ github.repository }}/${TAG}/description.md",
-              "tags":            ["visual", "environment"]
-            }
-          }
-          EOF
-          )
+          REPO="${{ github.repository }}"
+
+          # gh release view --json body always succeeds even when body is
+          # empty; the `&& printf x` / strip-trailing-x idiom preserves a
+          # genuinely empty CHANGELOG rather than losing it to command
+          # substitution's trailing-newline stripping.
+          CHANGELOG=$(gh release view "$TAG" --repo "$REPO" --json body --jq .body && printf x); CHANGELOG="${CHANGELOG%x}"
+          CHANGELOG="${CHANGELOG%$'\n'}"
+
+          PAYLOAD=$(NAME="$NAME" DESC="$DESC" REPO="$REPO" VERSION="$VERSION" TAG="$TAG" CHANGELOG="$CHANGELOG" "$BASH" "$S/marketplace-payload.sh")
 
           # Staging first (lands straight to main, no review), then the
           # curated marketplace (opens a review PR) -- same payload, two
